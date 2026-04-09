@@ -60,6 +60,112 @@ model UserItem {
     earnedAt            Int                 @default(0)
 }
 
+model OCMEvent {
+  dbId                    Int             @id @default(autoincrement())
+  competitionId           Int
+  qualifyingPeriodStartAt Int
+  qualifyingPeriodCloseAt Int
+  competitionStartAt      Int
+  competitionCloseAt      Int
+  competitionEndAt        Int
+  lengthOfPeriod          Int
+  lengthOfInterval        Int
+  area                    Int             @default(0)
+  minigamePatternId       Int             @default(0)
+  KOSHIENPeriod           KOSHIENPeriod[]
+  OCMPeriod               OCMPeriod[]
+}
+
+model OCMPlayRecord {
+  dbId          Int  @id @default(autoincrement())
+  carId         Int
+  competitionId Int
+  periodId      Int
+  brakingPoint  Int?
+  playedAt      Int  @default(0)
+  car           Car  @relation(fields: [carId], references: [carId])
+}
+
+model OCMTop1Ghost {
+  dbId          Int @id @default(autoincrement())
+  carId         Int
+  competitionId Int
+  periodId      Int
+  result        Int
+  tunePower     Int @default(0)
+  tuneHandling  Int @default(0)
+  car           Car @relation(fields: [carId], references: [carId])
+}
+
+model OCMTop1GhostTrail {
+  dbId          Int     @id @default(autoincrement())
+  carId         Int
+  area          Int
+  ramp          Int
+  path          Int
+  trail         Bytes
+  competitionId Int
+  periodId      Int
+  playedAt      Int     @default(0)
+  tunePower     Int     @default(0)
+  tuneHandling  Int     @default(0)
+  ocmMainDraw   Boolean @default(false)
+}
+
+model OCMTally {
+  dbId          Int @id @default(autoincrement())
+  carId         Int
+  competitionId Int
+  periodId      Int
+  result        Int
+  tunePower     Int @default(0)
+  tuneHandling  Int @default(0)
+  car           Car @relation(fields: [carId], references: [carId])
+}
+
+model OCMGhostBattleRecord {
+  dbId           Int     @id @default(autoincrement())
+  carId          Int
+  tunePower      Int     @default(0)
+  tuneHandling   Int     @default(0)
+  competitionId  Int
+  periodId       Int
+  result         Int
+  area           Int     @default(0)
+  playedAt       Int     @default(0)
+  playedShopName String  @default("Bayshore")
+  ocmMainDraw    Boolean @default(false)
+  car            Car     @relation(fields: [carId], references: [carId])
+}
+
+model OCMGhostTrail {
+  dbId          Int     @id @default(autoincrement())
+  carId         Int
+  area          Int
+  ramp          Int
+  path          Int
+  trail         Bytes
+  competitionId Int
+  periodId      Int
+  playedAt      Int     @default(0)
+  tunePower     Int     @default(0)
+  tuneHandling  Int     @default(0)
+  ocmMainDraw   Boolean @default(false)
+  car           Car     @relation(fields: [carId], references: [carId])
+}
+
+model OCMPeriod {
+  dbId             Int           @id @default(autoincrement())
+  competitionDbId  Int
+  competitionId    Int
+  periodId         Int
+  startAt          Int
+  closeAt          Int
+  kOSHIENeventDbId Int?
+  OCMEvent         OCMEvent      @relation(fields: [competitionDbId], references: [dbId])
+  KOSHIENevent     KOSHIENevent? @relation(fields: [kOSHIENeventDbId], references: [dbId])
+}
+
 model Car {
     user                User                @relation(fields: [userId], references: [id])
     userId              Int
