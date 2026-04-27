@@ -1,11 +1,9 @@
 import { Application } from "express";
-import { Config } from "../config";
-import { Module } from "module";
+import { Module } from "../module";
 import { prisma } from "..";
 
 // Import Proto
 import * as wm from "../wmmt/wm5.proto";
-import * as wmsrv from "../wmmt/service.proto";
 
 // Import Util
 import * as common from "./util/common";
@@ -14,216 +12,59 @@ import * as common from "./util/common";
 export default class TerminalModule extends Module {
     register(app: Application): void {
 
-        // Load upon enter terminal
-		app.post('/method/load_terminal_information', async (req, res) => {
+        // Load terminal information - called when player uses the terminal
+        // Request uses userId (not carId) in WMMT5
+        app.post('/method/load_terminal_information', async (req, res) => {
 
-            // Get the request body for the load terminal information request
             let body = wm.wm5.protobuf.LoadTerminalInformationRequest.decode(req.body);
 
-			// TODO: Add notices to config
-			let notice = (Config.getConfig().notices || []);
-			
-			// Create the notice window objects
-			let noticeWindows = notice.map(a => wm.wm5.protobuf.NoticeEntry.NOTICE_TEAM_JOINED);
+            // Look up user to check maxi gold receivable status
+            let user = await prisma.user.findFirst({
+                where: { id: body.userId }
+            });
 
-			// Response data
-			let msg = {
-				error: wm.wm5.protobuf.ErrorCode.ERR_SUCCESS,
-				noticeWindow: noticeWindows,
-				noticeWindowMessage: notice,
-				
-				maxiGoldReceivable: true,
-				prizeReceivable: true,
-				transferNotice: {
-					needToSeeTransferred: false,
-					needToRenameCar: false,
-					needToRenameTeam: false
-				},
-				announceFeature: false,
-				freeScratched: true
-			}
+            let msg = {
+                error: wm.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+                maxiGoldReceivable: true,
+                prizeReceivable: false,
+                noticeEntries: [],
+                noticeMessage: [],
+                noticeWindow: [],
+                noticeWindowMessage: [],
+                transferNotice: {
+                    needToSeeTransferred: false,
+                    needToRenameCar: false,
+                    needToRenameTeam: false,
+                },
+                announceFeature: false,
+                freeScratched: false,
+            };
 
-            // Encode the response
-			let message = wm.wm5.protobuf.LoadTerminalInformationResponse.encode(msg);
-
-			// Send the response to the client
+            let message = wm.wm5.protobuf.LoadTerminalInformationResponse.encode(msg);
             common.sendResponse(message, res);
-		})
+        });
 
-		
-		// Car Summary Request (for bookmarks, also for search ghost by name)
-		app.get('/resource/car_summary', async (req, res) => {
+        // Save terminal result - called when player exits the terminal
+        app.post('/method/save_terminal_result', async (req, res) => {
 
-			// Get the query from the request
-			let query = req.query;
-			let cars;
+            let body = wm.wm5.protobuf.SaveTerminalResultRequest.decode(req.body);
 
-			// Check the query limit
-			let queryLimit = 10
-			if(query.limit)
-			{
-				queryLimit = Number(query.limit);
-			}
+            // Update car order if provided
+            if (body.carOrder && body.carOrder.length > 0) {
+                await prisma.user.update({
+                    where: { id: body.userId },
+                    data: {
+                        carOrder: body.carOrder,
+                    }
+                });
+            }
 
-			// Check the last played place id
-			if(query.last_played_place_id)
-			{
-				let queryLastPlayedPlaceId = 1;
-				let getLastPlayedPlaceId = await prisma.placeList.findFirst({
-					where:{
-						placeId: String(query.last_played_place_id)
-					}
-				})
+            let msg = {
+                error: wm.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+            };
 
-				if(getLastPlayedPlaceId)
-				{
-					queryLastPlayedPlaceId = getLastPlayedPlaceId.id;
-				}
-
-				cars = await prisma.car.findMany({
-					take: queryLimit, 
-					where: {
-						lastPlayedPlaceId: queryLastPlayedPlaceId
-					},
-					include:{
-						gtWing: true,
-						lastPlayedPlace: true
-					}
-				});
-			}
-			else
-			{
-				// Get all of the cars matching the query
-				cars = await prisma.car.findMany({
-					take: queryLimit, 
-					where: {
-						OR:[
-							{
-								name: {
-									startsWith: String(query.name)
-								}
-							},
-							{
-								name: {
-									endsWith: String(query.name)
-								}
-							}
-						]
-						
-					},
-					include:{
-						gtWing: true,
-						lastPlayedPlace: true
-					}
-				});
-			}
-
-			// Check if regionId is 0
-			for(let i=0; i<cars.length; i++)
-			{
-				// Change to other value if regionId is 0
-				if(cars[i].regionId === 0)
-				{
-					let randomRegionId = Math.floor(Math.random() * 47) + 1;
-					cars[i].regionId = randomRegionId;
-				}
-			}
-			
-			// Response data
-			let msg = {
-				hitCount: cars.length,
-				cars: cars
-			}
-
-			// Encode the response
-			let message = wmsrv.wm5.protobuf.CarSummary.encode(msg);
-
-			// Send the response to the client
+            let message = wm.wm5.protobuf.SaveTerminalResultResponse.encode(msg);
             common.sendResponse(message, res);
-		})
-
-
-		// Save upon timeout / exit terminal
-		app.post('/method/save_terminal_result', async (req, res) => {
-
-			// Get the contents from the request
-			let body = wm.wm5.protobuf.SaveTerminalResultRequest.decode(req.body);
-
-			// user id is required field
-			let user = await prisma.user.findFirst({
-				where: { 
-					id: body.userId 
-				},
-			});
-
-			if(user)
-			{
-				// Get user tutorials
-				let storedTutorials = user?.confirmedTutorials;
-
-				// Update any seen tutorials
-				for(let i=0; i<body.confirmedTutorials.length; i++)
-				{
-					// Get the index of the selected tutorial
-					let indexTutoral = storedTutorials.indexOf(body.confirmedTutorials[i]);
-
-					// Only splice array when item is found
-					if (indexTutoral > -1) 
-					{ 
-						storedTutorials.splice(indexTutoral, 1); // 2nd parameter means remove one item only
-					}
-
-					// Add it back to the front
-					storedTutorials.unshift(body.confirmedTutorials[i]);
-				}
-
-				// If the car order was modified
-				// Update the car order in the table
-				if (body.carOrder.length > 0)
-				{
-					await prisma.user.update({
-						where: {
-							id: body.userId
-						},
-						data: {
-							carOrder: body.carOrder
-						}
-					});
-				}
-			}
-
-			// Response data
-			let msg = {
-				error: wm.wm5.protobuf.ErrorCode.ERR_SUCCESS,
-			}
-
-			// Encode the response
-			let message = wm.wm5.protobuf.SaveTerminalResultResponse.encode(msg);
-
-			// Send the response to the client
-            common.sendResponse(message, res);
-		})
-
-
-		// Save Scratch Sheet
-        app.post('/method/save_scratch_sheet', (req, res) => {
-
-            // Get the information from the request
-            let body = wm.wm5.protobuf.SaveScratchSheetRequest.decode(req.body);
-
-            // TODO: Actual stuff here
-			// This is literally just bare-bones so the shit boots
-
-			// Response data
-			let msg = {
-				error: wm.wm5.protobuf.ErrorCode.ERR_SUCCESS
-			};
-
-			// Encode the response
-			let message = wm.wm5.protobuf.SaveTerminalResultResponse.encode(msg);
-
-			// Send the response to the client
-			common.sendResponse(message, res);
-        })
-    }	
+        });
+    }
 }
