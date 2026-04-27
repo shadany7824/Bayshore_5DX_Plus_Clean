@@ -1,705 +1,772 @@
-import { Application } from "express";
-import { Module } from "module";
 import { prisma } from "..";
-import { Config } from "../config";
 
 // Import Proto
-import * as wm from "../wmmt/wm.proto";
-
-// Import Util
-import * as common from "./util/common";
-import * as ghost_ocm from "./ghost/ghost_ocm";
-import * as ghost_ocm_area from "./ghost/ghost_util/ghost_ocm_area";
+import * as wm from "../wmmt/wm5.proto";
+import * as wmproto from "../wmmt/wm5.proto";
 
 
-export default class GhostModule {
-    register(app: Application): void {
+// OCM Tallying
+export async function ocmTallying(body: wm.wm5.protobuf.LoadGhostCompetitionInfoRequest, periodId: number, ended: boolean)
+{
+    // OCM is still on going
+    if(ended === false)
+    {
+        periodId = periodId - 1;
 
-        // Get OCM Battle event info
-		app.post('/method/load_ghost_competition_info', async (req, res) => {
+        // Current day is main draw and tallying qualifying period
+        if(periodId === 0)
+        {
+            console.log('Tallying data from Qualifying');
 
-            // Get the request body for the load stamp target request
-			let body = wm.wm.protobuf.LoadGhostCompetitionInfoRequest.decode(req.body);
-
-            // Get current date
-			let date = Math.floor(new Date().getTime() / 1000);
-
-            // Get currently active OCM event (query still not complete)
-			let ocmEventDate = await prisma.oCMEvent.findFirst({ 
-				where: {
-					// qualifyingPeriodStartAt is less than current date
-					qualifyingPeriodStartAt: { lte: date },
-		
-					// competitionEndAt is greater than current date
-					competitionEndAt: { gte: date },
-				},
+            // Get user that playing OCM qualifying day
+            let gbRecordTally = await prisma.oCMGhostBattleRecord.findMany({ 
+                where:{
+                    ocmMainDraw: false,
+                    competitionId: body.competitionId,
+                    periodId: periodId
+                },
                 orderBy:{
-                    competitionId: 'desc'
+                    result: 'desc',
                 }
             });
-			
-			let msg: any;
-			if(ocmEventDate)
-			{
-				// Check OCM Period
-				let ocmPeriodCount = await prisma.oCMPeriod.count({ 
-					where:{
-						competitionId: ocmEventDate.competitionId
-					}
-				});
-				
-				if(ocmPeriodCount === 0)
-				{
-					console.log('Calculating how many period(s) are available');
-
-					let competitionPeriodStartTimestamp = ocmEventDate.competitionStartAt;
-					let competitionPeriodEndTimeStamp = 0;
-					let period = 1;
-
-					// Count how many period
-					while(competitionPeriodStartTimestamp < ocmEventDate.competitionCloseAt)
-					{
-						
-						// Count period closing timestamp
-						competitionPeriodEndTimeStamp = competitionPeriodStartTimestamp + ocmEventDate.lengthOfPeriod;
-
-						// competitionPeriodEndTimeStamp is more than competitionCloseAt
-						if(competitionPeriodEndTimeStamp > ocmEventDate.competitionCloseAt)
-						{
-							competitionPeriodEndTimeStamp = ocmEventDate.competitionCloseAt;
-						}
-
-						// Insert to table
-						await prisma.oCMPeriod.create({
-							data:{
-								competitionDbId: ocmEventDate.dbId,
-								competitionId: ocmEventDate.competitionId,
-								periodId: period,
-								startAt: competitionPeriodStartTimestamp,
-								closeAt: competitionPeriodEndTimeStamp
-							}
-						});
-
-						period++;
-						competitionPeriodStartTimestamp = competitionPeriodEndTimeStamp + ocmEventDate.lengthOfInterval;
-					}
-
-					// Check the gap between quali close and main draw start timestamp
-					let checkQualiMainGap = ocmEventDate.competitionStartAt - ocmEventDate.qualifyingPeriodCloseAt;
-					if(checkQualiMainGap < 3600)
-					{
-						let changeTime = ocmEventDate.competitionStartAt - 3600;
-						await prisma.oCMEvent.update({
-							where:{
-								dbId: ocmEventDate.dbId
-							},
-							data:{
-								qualifyingPeriodCloseAt: changeTime
-							}
-						})
-					}
-
-					console.log('Calculating Period Completed!');
-				}
-
-				// Current date is OCM main draw
-				if(ocmEventDate!.competitionStartAt < date && ocmEventDate!.competitionCloseAt > date)
-				{
-					console.log('Current OCM Day : Competition Day / Main Draw');
-
-					// Get Current OCM Period
-					let OCMCurrentPeriod = await prisma.oCMPeriod.findFirst({ 
-						where: {
-							competitionDbId: ocmEventDate!.dbId,
-							competitionId: ocmEventDate!.competitionId,
-							startAt: 
-							{
-								lte: date, // competitionStartAt is less than current date
-							},
-							closeAt:
-							{
-								gte: date, // competitionCloseAt is greater than current date
-							}
-						}
-					});
-
-					if(OCMCurrentPeriod)
-					{
-						// Get OCM Tally Count
-						let OCMTallyCount = await prisma.oCMTally.count({ 
-							where: {
-								competitionId: OCMCurrentPeriod.competitionId,
-								periodId: OCMCurrentPeriod.periodId
-							},
-							orderBy:{
-								periodId: 'desc'
-							}
-						});
-
-						// If not yet tallying
-						if(OCMTallyCount === 0)
-						{ 
-							await ghost_ocm.ocmTallying(body, OCMCurrentPeriod.periodId, false);
-
-							// Completed
-							console.log('Tally Completed!');
-						}
-
-						// Get Competition Day Event Data for the car
-						let ocmCompetitionDay = await ghost_ocm.ocmCompetitionDay(body, OCMCurrentPeriod!.competitionId, OCMCurrentPeriod!.periodId);
-
-						// Response Data
-						msg = ocmCompetitionDay.msg;
-					}
-					else
-					{
-						// Response data
-						msg = {
-							error: wm.wm.protobuf.ErrorCode.ERR_SUCCESS,
-							closed: true,
-							qualified: false, // if this set to false, user cannot enter OCM Battle game mode
-						};
-					}
-				}
-				// Current date is OCM qualifying day
-				else if(ocmEventDate!.qualifyingPeriodStartAt < date && ocmEventDate!.qualifyingPeriodCloseAt > date)
-				{ 
-					console.log('Current OCM Day : Qualifying Day');
-
-					// Get Competition Day Event Data for the car
-					let ocmCompetitionDay = await ghost_ocm.ocmQualifyingDay(body, ocmEventDate.competitionId);
-
-					// Response Data
-					msg = ocmCompetitionDay.msg;
-				}
-				// OCM has ended
-				else if(ocmEventDate!.competitionCloseAt < date && ocmEventDate!.competitionEndAt > date)
-				{
-					console.log('Current OCM Day : OCM has Ended');
-
-					// Tallying
-					// Get Current OCM Period
-					let OCMCurrentPeriod = await prisma.oCMPeriod.findFirst({ 
-						where: {
-							competitionId: ocmEventDate!.competitionId
-						},
-						orderBy: {
-							periodId: 'desc'
-						}
-					});
-
-					if(OCMCurrentPeriod)
-					{
-						// Get OCM Tally Count
-						let OCMTallyCount = await prisma.oCMTally.count({ 
-							where: {
-								competitionId: OCMCurrentPeriod.competitionId,
-								periodId: 999999999
-							},
-							orderBy:{
-								periodId: 'desc'
-							}
-						});
-
-						// If not yet tallying
-						if(OCMTallyCount === 0)
-						{ 
-							console.log('Tallying');
-
-							await ghost_ocm.ocmTallying(body, OCMCurrentPeriod.periodId, true);
-
-							// Completed
-							console.log('Last Tally Completed!');
-						}
-
-						
-						// Checking if nameplate reward is given
-						let checkOneParticipant = await prisma.oCMPlayRecord.findFirst({
-							orderBy:{
-								dbId: 'desc'
-							}
-						});
-
-						if(checkOneParticipant)
-						{
-							let itemId = 0;
-
-							// 16th - C1 Outbound
-							if(ocmEventDate.competitionId === 1)
-							{
-								itemId = 204;
-							}
-							// 17th - Osaka
-							else if(ocmEventDate.competitionId === 2)
-							{
-								itemId = 210;
-							}
-							// 18th - Fukuoka
-							else if(ocmEventDate.competitionId === 3)
-							{
-								itemId = 216;
-							}
-							// 19th - Nagoya
-							else if(ocmEventDate.competitionId === 4)
-							{
-								itemId = 222;
-							}
-							// 6th - C1 Inbound
-							else if(ocmEventDate.competitionId === 5) 
-							{
-								itemId = 35;
-							}
-							// 20th - Kobe
-							else if(ocmEventDate.competitionId === 6) 
-							{
-								itemId = 228;
-							}
-							// 7th - Fukutoshin
-							else if(ocmEventDate.competitionId === 7) 
-							{
-								itemId = 41;
-							}
-							// 21st - Hiroshima
-							else if(ocmEventDate.competitionId === 8) 
-							{
-								itemId = 234;
-							}
-							// 8th - Hakone
-							else if(ocmEventDate.competitionId === 9) 
-							{
-								itemId = 47;
-							}
-							// 1st - C1 Outbound
-							else if(ocmEventDate.competitionId === 10) 
-							{
-								itemId = 5;
-							}
-							// 2nd - Osaka
-							else if(ocmEventDate.competitionId === 11) 
-							{
-								itemId = 11;
-							}
-							// 3rd - Fukuoka
-							else if(ocmEventDate.competitionId === 12) 
-							{
-								itemId = 17;
-							}
-							// 4th - Nagoya
-							else if(ocmEventDate.competitionId === 13) 
-							{
-								itemId = 23;
-							}
-							// 5th - Yaesu
-							else if(ocmEventDate.competitionId === 14) 
-							{
-								itemId = 29;
-							}
-							// 9th - Hakone (Mt. Taikan)
-							else if(ocmEventDate.competitionId === 15) 
-							{
-								itemId = 53;
-							}
-							// 10th - Sub-center(Shibuya/Shinjuku)
-							else if(ocmEventDate.competitionId === 16) 
-							{
-								itemId = 93;
-							}
-							// 11th - Sub-center(Ikebukuro)
-							else if(ocmEventDate.competitionId === 17) 
-							{
-								itemId = 99;
-							}
-							// 12th - Kobe
-							else if(ocmEventDate.competitionId === 18) 
-							{
-								itemId = 105;
-							}
-							// 13th - New Belt Line
-							else if(ocmEventDate.competitionId === 19) 
-							{
-								itemId = 141;
-							}
-							// 14th - Yokohama
-							else if(ocmEventDate.competitionId === 20) 
-							{
-								itemId = 147;
-							}
-							// 15th - Hiroshima
-							else if(ocmEventDate.competitionId === 21) 
-							{
-								itemId = 153;
-							}
-
-							let checkNameplate = await prisma.carItem.count({
-								where:{
-									carId: checkOneParticipant.carId,
-									category: 17,
-									itemId: itemId
-								},
-								orderBy:{
-									itemId: 'desc'
-								}
-							});
-							
-
-							if(checkNameplate === 0)
-							{
-								await ghost_ocm.ocmGiveNamePlateReward(ocmEventDate.competitionId);
-							}
-
-							// else{} nameplate reward already given
-						}
-					}
-
-					// Response data
-					msg = {
-						error: wm.wm.protobuf.ErrorCode.ERR_SUCCESS,
-						closed: true
-					};
-				}
-				else
-				{
-					// Response data
-					msg = {
-						error: wm.wm.protobuf.ErrorCode.ERR_SUCCESS,
-						closed: true
-					};
-				}
-			}
-			// No OCM Event
-			else{
-				msg = {
-					error: wm.wm.protobuf.ErrorCode.ERR_SUCCESS,
-					closed: true
-				};
-			}
+            let arr = [];
             
-            // Encode the response
-			let message = wm.wm.protobuf.LoadGhostCompetitionInfoResponse.encode(msg);
+            // gbRecordTally is set
+            if(gbRecordTally)
+            {
+                let top1advantage = null;
+                let currentResult = 0;
 
-            // Send the response to the client
-            common.sendResponse(message, res, req.rawHeaders);
-		})
+                for(let i=0; i<gbRecordTally.length; i++)
+                {
+                    // Get the Top 1 Advantage
+                    if(top1advantage === null)
+                    {
+                        top1advantage = gbRecordTally[i].result;
 
+                        let getTrail = await prisma.oCMGhostTrail.findFirst({
+                            where:{
+                                carId: gbRecordTally[i].carId,
+                                competitionId: body.competitionId,
+                                periodId: periodId
+                            }
+                        })
 
-        // Get the Top 1 OCM Ghost for qualifying day and competition day (this still not completed)
-		app.get('/resource/ghost_competition_target', async (req, res) => {
+                        if(getTrail)
+                        {
+                            await prisma.oCMTop1GhostTrail.create({
+                                data: {
+                                    carId: getTrail.carId,
+                                    area: getTrail.area,
+                                    ramp: getTrail.ramp,
+                                    path: getTrail.path,
+                                    trail: getTrail.trail,
+                                    competitionId: getTrail.competitionId,
+                                    periodId: getTrail.periodId + 1,
+                                    playedAt: getTrail.playedAt,
+                                    tunePower: getTrail.tunePower,
+                                    tuneHandling: getTrail.tuneHandling
+                                }
+                            })
+                        }
+                    }
 
-            // Get url query parameter (competition_id)
-			let competition_id = Number(req.query.competition_id);
+                    // User is lose VS Top 1 Qualifying Ghost (minus advantage like -10 meter)
+                    if(top1advantage > 0)
+                    {
+                        if(gbRecordTally[i].result <= 0)
+                        {
+                            currentResult = top1advantage + Math.abs(gbRecordTally[i].result);
 
-			// Calling OCM Area function (BASE_PATH/src/util/games/games_util/ghost_ocm.ts)
-			let OCMArea = await ghost_ocm_area.OCMArea(competition_id);
+                            currentResult = -Math.abs(currentResult);
+                        }
+                        else
+                        {
+                            currentResult = gbRecordTally[i].result - top1advantage;
+                        }
+                    }
+                    else
+                    {
+                        currentResult = top1advantage +  Math.abs(gbRecordTally[i].result);
 
-			// Set the value from OCMArea
-			let areaVal: number = OCMArea.areaVal;
-			let rampVal: number = OCMArea.rampVal;
-			let pathVal: number = OCMArea.pathVal;
+                        currentResult = -Math.abs(currentResult);
+                    }
 
-            // Get url query parameter (period_id)
-			let period_id = Number(req.query.period_id); 
+                    // Pushing carId to array
+                    arr.push(gbRecordTally[i].carId); 
 
-            // Get current date
-			let date = Math.floor(new Date().getTime() / 1000);
+                    // Moving data to OCM Tally
+                    let data : any = {
+                        carId: gbRecordTally[i].carId,
+                        result: currentResult,
+                        competitionId: body.competitionId,
+                        periodId: periodId + 1
+                    }
 
-            // Get currently active OCM event
-			let ocmEventDate = await prisma.oCMEvent.findFirst({ 
-                where: {
-					// qualifyingPeriodStartAt is less than current date
-					qualifyingPeriodStartAt: { lte: date },
-		
-					// competitionEndAt is greater than current date
-					competitionEndAt: { gte: date },
-				},
-                orderBy:{
-                    competitionId: 'desc'
+                    // Create the data
+                    await prisma.oCMTally.create({
+                        data: data
+                    });
+
+                    if(i === 0){
+                        console.log('Making OCM Top 1 Ghost Data');
+
+                        // Create Top 1 ghost data
+                        await prisma.oCMTop1Ghost.create({
+                            data: data
+                        });
+                    }
+                } 
+            }
+
+            // Check if someone is retiring or use cheat engine time up
+            let checkPlayRecord = await prisma.oCMPlayRecord.findMany({ 
+                where:{
+                    competitionId: body.competitionId,
+                    NOT: {
+                        carId:{ in: arr }
+                    }
                 }
             });
 
-			if(!(ocmEventDate))
-			{
-				ocmEventDate = await prisma.oCMEvent.findFirst({
-                    orderBy:{
-                        competitionId: 'desc'
-                    },
+            if(checkPlayRecord)
+            {
+                for(let i=0; i<checkPlayRecord.length; i++)
+                {
+                    // Moving data to OCM Tally
+                    let dataLeft : any = {
+                        carId: checkPlayRecord[i].carId,
+                        result: -9999999,
+                        tunePower: 17,
+                        tuneHandling: 17,
+                        competitionId: body.competitionId,
+                        periodId: periodId + 1
+                    }
+
+                    // Create the data
+                    await prisma.oCMTally.create({
+                        data: dataLeft
+                    });
+                }
+            }
+        }
+        // Current day is main draw period 2 (and so on..) and tallying main draw period 1 (and so on..)
+        else
+        {
+            console.log('Tallying data from previous Period');
+
+            // Get user that playing OCM qualifying day
+            let OCMTally = await prisma.oCMTally.findMany({ 
+                where:{
+                    competitionId: body.competitionId,
+                    periodId: periodId
+                },
+                orderBy:{
+                    result: 'desc',
+                }
+            });
+            
+            // gbRecordTally is set
+            if(OCMTally)
+            {
+                let top1advantage = null;
+                let currentResult = 0;
+                for(let i=0; i<OCMTally.length; i++)
+                {
+                    // Get the Top 1 Advantage
+                    if(top1advantage === null)
+                    {
+                        top1advantage = OCMTally[0].result;
+
+                        let getTrail = await prisma.oCMGhostTrail.findFirst({
+                            where:{
+                                carId: OCMTally[0].carId,
+                                competitionId: body.competitionId,
+                            },
+                            orderBy:{
+                                playedAt: 'desc'
+                            }
+                        })
+
+                        if(getTrail)
+                        {
+                            console.log('Creating Trail');
+                            await prisma.oCMTop1GhostTrail.create({
+                                data: {
+                                    carId: getTrail.carId,
+                                    area: getTrail.area,
+                                    ramp: getTrail.ramp,
+                                    path: getTrail.path,
+                                    trail: getTrail.trail,
+                                    competitionId: getTrail.competitionId,
+                                    periodId: periodId + 1,
+                                    playedAt: getTrail.playedAt,
+                                    tunePower: getTrail.tunePower,
+                                    tuneHandling: getTrail.tuneHandling
+                                }
+                            })
+                        }
+                    }
+
+                    // Get the Top 1 Advantage
+                    if(top1advantage > 0)
+                    {
+                        if(OCMTally[i].result <= 0)
+                        {
+                            currentResult = top1advantage + Math.abs(OCMTally[i].result);
+
+                            currentResult = -Math.abs(currentResult);
+                        }
+                        else
+                        {
+                            currentResult = OCMTally[i].result - top1advantage;
+                        }
+                    }
+                    else
+                    {
+                        currentResult = top1advantage +  Math.abs(OCMTally[i].result);
+
+                        currentResult = -Math.abs(currentResult);
+                    }
+
+                    // Moving data to OCM Tally
+                    let data : any = {
+                        carId: OCMTally[i].carId,
+                        result: currentResult,
+                        competitionId: body.competitionId,
+                        periodId: periodId + 1
+                    }
+
+                    let checkOCMTally = await prisma.oCMTally.findFirst({
+                        where: {
+                            carId: OCMTally[i].carId,
+                            competitionId: body.competitionId,
+                        }
+                    });
+
+                    if(checkOCMTally)
+                    {
+                        // Update the tally data
+                        await prisma.oCMTally.update({
+                            where:{
+                                dbId: checkOCMTally?.dbId
+                            },
+                            data: data
+                        });
+                    }
+                    
+
+                    if(i === 0)
+                    {
+                        console.log('Making OCM Top 1 Ghost Data');
+
+                        // Create Top 1 ghost data
+                        await prisma.oCMTop1Ghost.create({
+                            data: data
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // OCM is ended
+    else
+    {
+        console.log('Tallying data for end of OCM');
+
+        // Get user that playing OCM qualifying day
+        let OCMTally = await prisma.oCMTally.findMany({ 
+            where:{
+                competitionId: body.competitionId,
+                periodId: periodId
+            },
+            orderBy:{
+                result: 'desc',
+            }
+        });
+        
+        // gbRecordTally is set
+        if(OCMTally)
+        {
+            let top1advantage = null;
+            let currentResult = 0;
+            for(let i=0; i<OCMTally.length; i++)
+            {
+                // Get the Top 1 Advantage
+                if(top1advantage === null)
+                {
+                    top1advantage = OCMTally[0].result;
+
+                    let getTrail = await prisma.oCMGhostTrail.findFirst({
+                        where:{
+                            carId: OCMTally[0].carId,
+                            competitionId: body.competitionId
+                        }
+                    })
+
+                    if(getTrail)
+                    {
+                        await prisma.oCMTop1GhostTrail.create({
+                            data: {
+                                carId: getTrail.carId,
+                                area: getTrail.area,
+                                ramp: getTrail.ramp,
+                                path: getTrail.path,
+                                trail: getTrail.trail,
+                                competitionId: getTrail.competitionId,
+                                periodId: 999999999,
+                                playedAt: getTrail.playedAt,
+                                tunePower: getTrail.tunePower,
+                                tuneHandling: getTrail.tuneHandling
+                            }
+                        })
+                    }
+                }
+
+                // Get the Top 1 Advantage
+                if(top1advantage > 0)
+                {
+                    if(OCMTally[i].result <= 0)
+                    {
+                        currentResult = top1advantage + Math.abs(OCMTally[i].result);
+
+                        currentResult = -Math.abs(currentResult);
+                    }
+                    else
+                    {
+                        currentResult = OCMTally[i].result - top1advantage;
+                    }
+                }
+                else
+                {
+                    currentResult = top1advantage +  Math.abs(OCMTally[i].result);
+
+                    currentResult = -Math.abs(currentResult);
+                }
+
+                // Moving data to OCM Tally
+                let data : any = {
+                    carId: OCMTally[i].carId,
+                    result: currentResult,
+                    competitionId: body.competitionId,
+                    periodId: 999999999
+                }
+
+                let checkOCMTally = await prisma.oCMTally.findFirst({
+                    where: {
+                        carId: OCMTally[i].carId,
+                        competitionId: body.competitionId,
+                    }
                 });
-			}
 
-			// Declare variable for Top 1 OCM Ghost
-			let ghostCars: wm.wm.protobuf.GhostCar;
-			let ghostTypes;
-			let cars: wm.wm.protobuf.ICar | null;
-			let playedPlace = wm.wm.protobuf.Place.create({ 
-				placeId: Config.getConfig().placeId,
-                regionId: Config.getConfig().regionId,
-                shopName: Config.getConfig().shopName,
-                country: Config.getConfig().country
-			});
-			let competitionSchedule;
+                if(checkOCMTally)
+                {
+                    // Update the tally data
+                    await prisma.oCMTally.update({
+                        where:{
+                            dbId: checkOCMTally?.dbId
+                        },
+                        data: data
+                    });
+                }
+                
 
-			// Get default trail id
-			let ghostTrailId = 0;
+                if(i === 0)
+                {
+                    console.log('Making OCM Top 1 Ghost Data');
 
-            // Current date is OCM main draw
-			if(ocmEventDate!.competitionStartAt < date && ocmEventDate!.competitionCloseAt > date)
-			{
-				console.log('OCM Competition Day / Main Draw');
-
-                // Get Top 1 qualifying car data
-				let ocmTallyRecord = await prisma.oCMTop1Ghost.findFirst({ 
-					where:{
-						competitionId: competition_id,
-						periodId: period_id
-					},
-					orderBy:{
-						result: 'desc'
-					},
-				});
-
-                // Get Top 1 qualifying ghost trail id
-				let checkGhostTrail = await prisma.oCMTop1GhostTrail.findFirst({ 
-					where:{
-						carId: ocmTallyRecord!.carId,
-						competitionId: ocmEventDate!.competitionId,
-						periodId: period_id,
-					},
-					orderBy:{
-						playedAt: 'desc'
-					},
-				});
-
-                // Top 1 OCM Ghost trail data available
-				if(checkGhostTrail)
-				{ 
-                    // Get the Top 1 OCM car data
-					cars = await prisma.car.findFirst({ 
-						where:{
-							carId: checkGhostTrail!.carId
-						},
-						include:{
-							gtWing: true,
-							lastPlayedPlace: true
-						}
-					});
-
-                    // Set the tunePower used when playing ghost crown
-					cars!.tunePower = ocmTallyRecord!.tunePower; 
-
-                    // Set the tuneHandling used when playing ghost crown
-					cars!.tuneHandling = ocmTallyRecord!.tuneHandling;
-
-					// Set Ghost stuff Value
-					cars!.lastPlayedAt = checkGhostTrail.playedAt
-					ghostTrailId = checkGhostTrail.dbId!;
-					areaVal = Number(checkGhostTrail.area);
-					rampVal = Number(checkGhostTrail.ramp);
-					pathVal = Number(checkGhostTrail.path);
-					ghostTypes = wm.wm.protobuf.GhostType.GHOST_NORMAL;
-				}
-			}
-            // Current date is OCM qualifying day
-			else if(ocmEventDate!.qualifyingPeriodStartAt < date && ocmEventDate!.qualifyingPeriodCloseAt > date)
-			{ 
-				console.log('OCM Qualifying Day');
-
-                // Get the default ghost trail
-				let checkGhostTrail = await prisma.oCMTop1GhostTrail.findFirst({ 
-					where:{
-						carId: 999999999,
-						competitionId: ocmEventDate!.competitionId,
-						periodId: 0,
-					},
-					orderBy:{
-						playedAt: 'desc'
-					}
-				});
-
-				// Generate default S660 car data
-				cars = wm.wm.protobuf.Car.create({ 
-					carId: 999999999, // Don't change this
-					name: 'Ｓ６６０',
-					regionId: Math.floor(Math.random() * 47) + 1, // Random Region, old code -> // 18, // IDN (福井)
-					manufacturer: 12, // HONDA
-					model: 105, // S660 [JW5]
-					visualModel: 130, // S660 [JW5]
-					defaultColor: 0,
-					customColor: 0,
-					wheel: 20,
-					wheelColor: 0,
-					aero: 0,
-					bonnet: 0,
-					wing: 0,
-					mirror: 0,
-					neon: 0,
-					trunk: 0,
-					plate: 0,
-					plateColor: 0,
-					plateNumber: 0,
-					tunePower: checkGhostTrail!.tunePower,
-					tuneHandling: checkGhostTrail!.tuneHandling,
-					rivalMarker: 32,
-					aura: 551,
-					windowSticker: true,
-					windowStickerString: 'ＢＡＹＳＨＯＲＥ',
-					windowStickerFont: 0,
-					title: 'Don\'t have S660?',
-					level: 65, // SSSSS
-					lastPlayedAt: checkGhostTrail!.playedAt,
-					country: 'JPN', // Change to JPN, old code -> 'IDN',
-					lastPlayedPlace: playedPlace
-				});
-				
-				// Set Ghost stuff Value
-				ghostTrailId = checkGhostTrail!.dbId;
-				areaVal = Number(checkGhostTrail!.area);
-				rampVal = Number(checkGhostTrail!.ramp);
-				pathVal = Number(checkGhostTrail!.path);
-				ghostTypes = wm.wm.protobuf.GhostType.GHOST_NORMAL;
-			}
-			else if(ocmEventDate!.competitionCloseAt < date && ocmEventDate!.competitionEndAt > date)
-			{ 
-				// TODO: Actual stuff here
-            	// This is literally just bare-bones so the shit boots
-			}
-			else
-			{
-				console.log('OCM has ended');
-
-                // Get Top 1 qualifying car data
-				let ocmTallyRecord = await prisma.oCMTop1Ghost.findFirst({ 
-					where:{
-						competitionId: competition_id,
-						periodId: 999999999
-					},
-					orderBy:{
-						result: 'desc'
-					},
-				});
-
-                // Get Top 1 qualifying ghost trail id
-				let checkGhostTrail = await prisma.oCMTop1GhostTrail.findFirst({ 
-					where:{
-						competitionId: competition_id,
-						periodId: 999999999,
-					},
-					orderBy:{
-						playedAt: 'desc'
-					},
-				});
-
-                // Top 1 OCM Ghost trail data available
-				if(checkGhostTrail)
-				{ 
-                    // Get the Top 1 OCM car data
-					cars = await prisma.car.findFirst({ 
-						where:{
-							carId: checkGhostTrail!.carId
-						},
-						include:{
-							gtWing: true,
-							lastPlayedPlace: true
-						}
-					});
-
-                    // Set the tunePower used when playing ghost crown
-					cars!.tunePower = ocmTallyRecord!.tunePower; 
-
-                    // Set the tuneHandling used when playing ghost crown
-					cars!.tuneHandling = ocmTallyRecord!.tuneHandling;
-
-					// Set Ghost stuff Value
-					cars!.lastPlayedAt = checkGhostTrail.playedAt
-					ghostTrailId = checkGhostTrail.dbId!;
-					ghostTypes = wm.wm.protobuf.GhostType.GHOST_NORMAL;
-
-					let checkShopName = await prisma.oCMGhostBattleRecord.findFirst({
-						where:{
-							carId: checkGhostTrail!.carId,
-							competitionId: competition_id
-						},
-						select:{
-							playedShopName: true
-						}
-					})
-
-					if(checkShopName)
-					{
-						cars!.lastPlayedPlace!.shopName = checkShopName.playedShopName;
-					}
+                    // Create Top 1 ghost data
+                    await prisma.oCMTop1Ghost.create({
+                        data: data
+                    });
+                }
+            }
+        }
+    }
+}
 
 
-					let ocmEventDate = await prisma.oCMEvent.findFirst({
-						where:{
-							competitionId: competition_id
-						}
-					});
+// OCM Competition (Main Draw) Day
+export async function ocmCompetitionDay(body: wm.wm5.protobuf.LoadGhostCompetitionInfoRequest, competitionId: number, periodId: number)
+{
+    console.log("Competition ID: " +competitionId+ ", Period ID: " +periodId);
+    let isQualified: boolean = false;
 
-					if(ocmEventDate)
-					{
-						// Creating GhostCompetitionSchedule
-						competitionSchedule = wm.wm.protobuf.GhostCompetitionSchedule.create({ 
+    // Get Top 1 qualifying car data
+    let ocmTallyRecord = await prisma.oCMTally.findMany({ 
+        where:{
+            competitionId: competitionId,
+        },
+        orderBy: [
+            {
+                result: 'desc',
+            },
+            {
+                periodId: 'desc'
+            },
+        ],
+        distinct: ['carId'],
+    });
 
-							// OCM Competition ID (1 = C1 (Round 16), 4 = Nagoya (Round 19), 8 = Hiroshima (Round 21))
-							competitionId: ocmEventDate.competitionId,
-	
-							// OCM Qualifying Start Timestamp
-							qualifyingPeriodStartAt: ocmEventDate.qualifyingPeriodStartAt, 
-	
-							// OCM Qualifying Close Timestamp
-							qualifyingPeriodCloseAt: ocmEventDate.qualifyingPeriodCloseAt,
-	
-							// OCM Competition (Main Draw) Start Timestamp
-							competitionStartAt: ocmEventDate.competitionStartAt, 
-	
-							// OCM Competition (Main Draw) Close Timestamp
-							competitionCloseAt: ocmEventDate.competitionCloseAt, 
-	
-							// OCM Competition (Main Draw) End Timestamp
-							competitionEndAt: ocmEventDate.competitionEndAt, 
-	
-							// idk what this is
-							lengthOfPeriod: ocmEventDate.lengthOfPeriod, 
-	
-							// idk what this is
-							lengthOfInterval: ocmEventDate.lengthOfInterval, 
-	
-							// Area for the event (GID_RUNAREA_*, 8 is GID_RUNAREA_NAGOYA)
-							area: ocmEventDate.area, 
-	
-							// idk what this is
-							minigamePatternId: ocmEventDate.minigamePatternId 
-						});
-					}
-				}
-			}
+    // Get user ranking
+    let resultAdvantage = 0;
+    let currentRank = 0;
+    let topresult = []
+    for(let i=0; i<ocmTallyRecord.length; i++)
+    {
+        if(ocmTallyRecord[i].carId == body.carId)
+        {
+            // Get main draw advantage (Current car advantage from qualifying day - Top 1 OCM Ghost advantage from qualifying day)
+            resultAdvantage = ocmTallyRecord![i].result
+            currentRank = i + 1;
+            isQualified = true;
+        }
+        else
+        {
+            topresult.push(ocmTallyRecord[i].result);
+        }
+    }
 
-			// Push the Top 1 OCM ghost car data
-			ghostCars = wm.wm.protobuf.GhostCar.create({ 
-				car: cars!,
-				area: areaVal,
-				ramp: rampVal,
-				path: pathVal,
-				nonhuman: false,
-				type: ghostTypes,
-				trailId: ghostTrailId,
-			});
+    // Mini game braking point
+    let msg: any;
+    if(isQualified)
+    { 
+        // Response data
+        msg = {
+            error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+            periodId: periodId,
+            closed: false,
+            topResults: topresult,
+            qualified: isQualified,
+            result: resultAdvantage,
+            rank: currentRank
+        };
+    }
+    // User not yet playing OCM Battle game mode
+    else
+    {
+        // Response data
+        msg = {
+            error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+            periodId: periodId,
+            closed: false,
+            qualified: false, // if this set to false, user cannot enter OCM Battle game mode
+        };
+    }
 
+    // Return value
+    return { msg }
+}
+
+
+// OCM Qualifying Day
+export async function ocmQualifyingDay(body: wm.wm5.protobuf.LoadGhostCompetitionInfoRequest, competitionId: number)
+{
+    // Get user's available OCM Battle Record
+    let ocmRecord: any = await prisma.oCMPlayRecord.findFirst({
+        where:{
+            carId: body.carId,
+            competitionId: competitionId
+        },
+        orderBy:{
+            dbId: 'desc'
+        }
+    });
+
+    let isQualified: boolean = true;
+    let msg: any;
+
+    if(ocmRecord)
+    {
+        // Get user's ghost battle record versus Top 1 OCM ghost
+        let gbRecord = await prisma.oCMGhostBattleRecord.findFirst({ 
+            where:{
+                carId: body.carId,
+                competitionId: competitionId,
+                periodId: 0,
+                ocmMainDraw: false
+            },
+            orderBy:{
+                dbId: 'desc',
+            }
+        });
+
+        // Mini game braking point
+        if(gbRecord)
+        {
+            if(ocmRecord?.brakingPoint !== null && ocmRecord?.brakingPoint !== undefined)
+            {
+                // User is not braking and let the car crashed lmao
+                if(ocmRecord!.brakingPoint === 0){ 
+                    msg = {
+                        error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+                        periodId: 0,
+                        closed: false,
+                        qualified: isQualified,
+                        result: gbRecord!.result
+                    };
+                }
+                // User is pressing brake
+                else
+                { 
+                    // Response data
+                    msg = {
+                        error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+                        periodId: 0,
+                        closed: false,
+                        qualified: isQualified,
+                        brakingPoint: ocmRecord!.brakingPoint,
+                        result: gbRecord!.result
+                    };
+                }
+            }
+            else
+            {
+                // Response data
+                msg = {
+                    error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+                    periodId: 0,
+                    closed: false,
+                    qualified: isQualified,
+                    result: gbRecord!.result
+                };
+            }
+        }
+        // Record not found
+        else
+        {
             // Response data
-			let msg = {
-				error: wm.wm.protobuf.ErrorCode.ERR_SUCCESS,
-				competitionId: competition_id,
-				specialGhostId: competition_id,
-				ghostCar: ghostCars,
-				trailId: ghostTrailId,
-				updatedAt: date,
-				competitionSchedule: competitionSchedule || null
-			};
+            msg = {
+                error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+                periodId: 0,
+                closed: false,
+                qualified: true, // if this set to false, user cannot enter OCM Battle game mode
+            };
+        }
+    }
+    // User not yet playing OCM Battle game mode
+    else
+    {
+        // Response data
+        msg = {
+            error: wmproto.wm5.protobuf.ErrorCode.ERR_SUCCESS,
+            periodId: 0,
+            closed: false,
+            qualified: true, // if this set to false, user cannot enter OCM Battle game mode
+        };
+    }
 
-            // Encode the response
-			let message = wm.wm.protobuf.GhostCompetitionTarget.encode(msg);
+    return { msg }
+}
 
-            // Send the response to the client
-            common.sendResponse(message, res, req.rawHeaders);
-		})
+
+// Give nameplate reward
+export async function ocmGiveNamePlateReward(competitionId: number)
+{
+    let getCarParticipant = await prisma.oCMTally.findMany({
+        where:{
+            competitionId: competitionId,
+        },
+        orderBy:{
+            result: 'desc'
+        }
+    });
+
+    if(getCarParticipant)
+    {
+        console.log('Giving OCM Rewards');
+
+        let participantLength = getCarParticipant.length;
+    
+        // Participant is more than certain number (100 is default)
+        if(participantLength > 100)
+        {
+            participantLength = 100;
+        }
+
+        let itemIdParticipant = 0;
+        let itemIdGp = 0;
+        switch (competitionId)
+        {
+            // 16th - C1
+            case 1:
+                itemIdParticipant = 204;
+                itemIdGp = 205;
+                break;
+
+            // 17th - Osaka
+            case 2:
+                itemIdParticipant = 210;
+                itemIdGp = 211;
+                break;
+                
+            // 18th - Fukuoka
+            case 3:
+                itemIdParticipant = 216;
+                itemIdGp = 217;
+                break;
+                
+            // 19th - Nagoya
+            case 4:
+                itemIdParticipant = 222;
+                itemIdGp = 223;
+                break;
+                
+            // 6th - C1
+            case 5:
+                itemIdParticipant = 35;
+                itemIdGp = 36;
+                break;
+                
+            // 20th - Kobe
+            case 6:
+                itemIdParticipant = 228;
+                itemIdGp = 229;
+                break;
+                
+            // 7th - Fukutoshin
+            case 7:
+                itemIdParticipant = 41;
+                itemIdGp = 42;
+                break;
+                
+            // 21st - Hiroshima
+            case 8:
+                itemIdParticipant = 234;
+                itemIdGp = 235;
+                break;
+                
+            // 8th - Hakone
+            case 9:
+                itemIdParticipant = 47;
+                itemIdGp = 48;
+                break;
+                
+            // 1st - C1
+            case 10:
+                itemIdParticipant = 5;
+                itemIdGp = 6;
+                break;
+                
+            // 2nd - Osaka
+            case 11:
+                itemIdParticipant = 11;
+                itemIdGp = 12;
+                break;
+                
+            // 3rd - Fukuoka
+            case 12:
+                itemIdParticipant = 17;
+                itemIdGp = 18;
+                break;
+                
+            // 4th - Nagoya
+            case 13:
+                itemIdParticipant = 23;
+                itemIdGp = 24;
+                break;
+                
+            // 5th - Yaesu
+            case 14:
+                itemIdParticipant = 29;
+                itemIdGp = 30;
+                break;
+                
+            // 9th - Hakone (Mt. Taikan)
+            case 15:
+                itemIdParticipant = 53;
+                itemIdGp = 54;
+                break;
+                
+            // 10th - Sub-center(Shibuya/Shinjuku)
+            case 16:
+                itemIdParticipant = 93;
+                itemIdGp = 94;
+                break;
+                
+            // 11th - Sub-center(Ikebukuro)
+            case 17:
+                itemIdParticipant = 99;
+                itemIdGp = 100;
+                break;
+                
+            // 12th - Kobe
+            case 18:
+                itemIdParticipant = 105;
+                itemIdGp = 106;
+                break;
+                
+            // 13th - New Belt Line
+            case 19:
+                itemIdParticipant = 141;
+                itemIdGp = 142;
+                break;
+                
+            // 14th - Yokohama
+            case 20:
+                itemIdParticipant = 147;
+                itemIdGp = 148;
+                break;
+                
+            // 15th - Hiroshima
+            case 21:
+                itemIdParticipant = 153;
+                itemIdGp = 154;
+                break;
+        }
+
+        // Participation Award
+        for(let i=0; i<getCarParticipant.length; i++)
+        {
+            let checkItem = await prisma.carItem.findFirst({
+                where: {
+                    carId: getCarParticipant[i].carId,
+                    category: 17,
+                    itemId: itemIdParticipant,
+                    amount: 1
+                }
+            });
+
+            if (!checkItem)
+            {
+                await prisma.carItem.create({
+                    data:{
+                        carId: getCarParticipant[i].carId,
+                        category: 17,
+                        itemId: itemIdParticipant,
+                        amount: 1,
+                        earnedAt: Math.floor(new Date().getTime() / 1000)
+                    }
+                })
+            }
+        }
+
+        // Ranking within the top 100
+        for(let i=0; i<participantLength; i++)
+        {
+            let checkItem = await prisma.carItem.findFirst({
+                where: {
+                    carId: getCarParticipant[i].carId,
+                    category: 17,
+                    itemId: itemIdGp,
+                    amount: 1
+                }
+            });
+
+            if (!checkItem)
+            {
+                await prisma.carItem.create({
+                    data:{
+                        carId: getCarParticipant[i].carId,
+                        category: 17,
+                        itemId: itemIdGp,
+                        amount: 1,
+                        earnedAt: Math.floor(new Date().getTime() / 1000)
+                    }
+                })
+            }
+        }
+
+        console.log('OCM Rewards Given');
     }
 }
