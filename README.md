@@ -10,6 +10,8 @@ this repo is based on the original repo (https://github.com/ProjectAsakura/Baysh
 ## What is working
  - Same like 5 , 5DX
  - Story Mode Chapter 60 + Get BGM and Meter
+ - Maxi Coin
+ - Online Champion Match (OCM) (85% working. The OCM progress is currently not saving.)
  - Time Attack 
  - Online Ghost Versus Battle (Send me by **skap** coding by **daiz**)
  - Discarded Vehicle Card to Full Tune Ticket 600hp to 830hp
@@ -21,7 +23,6 @@ this repo is based on the original repo (https://github.com/ProjectAsakura/Baysh
  - Ghost Trophies
  - Japan Challenge
  - Venue Crown (Crown Battle)
- - Online Champion Match (OCM)
  - VS Other Region Ghost (VSORG)
   
 ## Credits
