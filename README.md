@@ -19,7 +19,7 @@ this repo is based on the original repo (https://github.com/ProjectAsakura/Baysh
  ## What is not working (Some parts must wait to be fixed in the future by Shiroi Kitsu.)
  - Transfer from 5 , 5DX
  - Car Livery , Decal
- - Maxi Coin
+ - Terminal (idk why terminal cannot be accessed)
  - Ghost Trophies
  - Japan Challenge
  - Venue Crown (Crown Battle)
