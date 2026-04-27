@@ -34,18 +34,44 @@ export default class GameModule extends Module {
 				}
 			});
 
-			// Declare some variable
-			// Default value is 'false', inside 'BASE_PATH/src/util/games/ghost.ts' file
-			let ghostModePlay;
-			
-			// Default value is 'false', inside 'BASE_PATH/src/util/games/ghost.ts' file
-			let updateNewTrail; 
+			// Determine ghost battle mode flags from request data
+			let ghostModePlay      = false;
+			let updateNewTrail     = false;
+			let competitionModePlay = false;
+			let crownModePlay      = false;
 
-			// Default value is 'false', inside 'BASE_PATH/src/util/games/ghost.ts' file
-			let competitionModePlay; 
+			// Ghost battle mode is active if rgResult is present
+			if (body.gameMode === wm.wm5.protobuf.GameMode.MODE_GHOST_BATTLE && body.rgResult)
+			{
+				ghostModePlay  = true;
+				updateNewTrail = true;
 
-			// Default value is 'false', inside 'BASE_PATH/src/util/games/ghost.ts' file
-			let crownModePlay; 
+				let date = Math.floor(new Date().getTime() / 1000);
+
+				// Check if an OCM event is currently active
+				let ocmEvent = await prisma.oCMEvent.findFirst({
+					where: {
+						qualifyingPeriodStartAt: { lte: date },
+						competitionEndAt:        { gte: date },
+					}
+				});
+
+				if (ocmEvent) {
+					// OCM Battle mode - competition is active
+					competitionModePlay = true;
+				} else {
+					// Check if this is a crown battle (opponent car holds a crown)
+					let opponentCarId = body.rgResult.opponentCarId;
+					if (opponentCarId) {
+						let crownEntry = await prisma.carCrown.findFirst({
+							where: { carId: opponentCarId }
+						});
+						if (crownEntry) {
+							crownModePlay = true;
+						}
+					}
+				}
+			}
 
 			// Switch on the gamemode
 			switch (body.gameMode) 
@@ -169,6 +195,21 @@ export default class GameModule extends Module {
 				await meter_reward.giveMeterRewards(body);
 			}
 
+			// --- Maxi Gold ---
+			if (body.earnedMaxiGold !== null && body.earnedMaxiGold !== undefined && body.earnedMaxiGold > 0)
+			{
+				console.log(`Maxi Gold earned: ${body.earnedMaxiGold}, new balance: ${body.maxiGold}`);
+
+				// Update car's total maxi gold and current coin balance
+				await prisma.car.update({
+					where: { carId: body.carId },
+					data: {
+						totalMaxiGold: { increment: body.earnedMaxiGold },
+						maxiCoin: body.maxiGold ?? 0,
+					}
+				});
+			}
+
 			// Update user
 			let user = await prisma.user.findFirst({
 				where: {
@@ -223,7 +264,12 @@ export default class GameModule extends Module {
 					},
 					data: {
 						confirmedTutorials: storedTutorials, 
-						carOrder: carOrder
+						carOrder: carOrder,
+						// Save Maxi Gold balance and lifetime earned to user
+						...(body.earnedMaxiGold !== null && body.earnedMaxiGold !== undefined && body.earnedMaxiGold > 0 ? {
+							maxiGold: body.maxiGold ?? 0,
+							earnedMaxiGold: { increment: body.earnedMaxiGold },
+						} : {})
 					}
 				});
 			}
