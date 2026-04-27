@@ -1,5 +1,5 @@
-// Bayshore - a Wangan Midnight Maximum Tune 6 private server.
-// Made with love by Luna, and part of Project Asakura.
+// Bayshore - a Wangan Midnight Maximum Tune 5DX+ private server.
+// Made with love by Luna, modified by shadany7824 and part of Project Asakura.
 
 import express, { Router } from 'express';
 import {PrismaClient} from '@prisma/client';
@@ -87,6 +87,9 @@ for (let i of dirs)
     {
         // Require the module file
         let mod = require(`./modules/${i.substring(0, i.length - 3)}`); // .js extension
+
+        // Skip helper files that don't export a Module class
+        if (!mod.default || typeof mod.default !== 'function') continue;
 
         // Create an instance of the module
         let inst = new mod.default();
